@@ -44,6 +44,9 @@ def launch_instance(**kwargs):
 
     ctx.logger.info("Launching instance")
     subnet_ids = _get_subnets(ctx)
+    if len(subnet_ids) < 1:
+        raise NonRecoverableError("no subnet configured")
+
     launch_config = oraclebmc.core.models.LaunchInstanceDetails()
     launch_config.availability_domain = \
         ctx.node.properties['availability_domain']
