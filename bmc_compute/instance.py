@@ -102,6 +102,8 @@ def wait_for_running(**kwargs):
         vnic = vnc_client.get_vnic(vnas.data[0].vnic_id)
         ctx.instance.runtime_properties['public_ip'] = vnic.data.public_ip
         ctx.instance.runtime_properties['private_ip'] = vnic.data.private_ip
+        # required by manager bootstrap, unfortunately
+        ctx.instance.runtime_properties['ip'] = vnic.data.private_ip
 
     except:
         raise NonRecoverableError("Instance create failed: {}".format(
