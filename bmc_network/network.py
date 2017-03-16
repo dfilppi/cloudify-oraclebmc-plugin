@@ -24,6 +24,25 @@ from cloudify.exceptions import NonRecoverableError
 from cloudify.decorators import operation
 
 
+def _set_security_rules(ctx,vcn_client,vcn):
+    rules=[]
+    for sr in ctx.node.properties['security_rules']:
+        rule = oraclebmc.core.models.IngressSecurityRule()
+        rule.protocol = "6"
+        rule.source = sr.split(',')[0]
+        portrange = oraclebmc.core.models.PortRange()
+        portrange.min = sr.split(',')[1]
+        portrange.max = sr.split(',')[1]
+        topts = oraclebmc.core.models.TcpOptions()
+        topts.destination_port_range = portrange
+        rule.tcp_options = topts
+        rules.append(rule)
+
+    details = oraclebmc.core.models.UpdateSecurityListDetails()
+    details.ingress_security_rules = rules
+    vcn_client.update_security_list(vcn.default_security_list_id,details)
+
+
 @operation
 def create_vcn(**kwargs):
 
@@ -49,6 +68,7 @@ def create_vcn(**kwargs):
                                                vcn.id))
     ctx.instance.runtime_properties['id'] = vcn.id
 
+    _set_security_rules(ctx,vcn_client,vcn)
 
 @operation
 def delete_vcn(**kwargs):
@@ -83,8 +103,6 @@ def wait_for_vcn_terminated(**kwargs):
 
     except:
         pass
-
-#@with_vcn_client
 
 
 @operation
@@ -218,6 +236,11 @@ def connect_gateway_to_network(**kwargs):
 
 @operation
 def connect_instance_to_subnet(**kwargs):
+    ctx.logger.debug("HERE")
+    ctx.logger.debug('setting subnet_{} to {}'.
+                     format(ctx.target.instance.id,
+                            ctx.target.instance.runtime_properties['id']))
+
     ctx.source.instance.runtime_properties[(
         'subnet_'+ctx.target.instance.id)] = \
         ctx.target.instance.runtime_properties['id']
