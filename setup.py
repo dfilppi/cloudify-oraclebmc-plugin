@@ -36,6 +36,8 @@ setup(
 
     license='LICENSE',
     install_requires=[
-        'cloudify-plugins-common>=3.4.1'
+        'cloudify-plugins-common>=3.4.1',
+        'oraclebmc>=1.1.1',
+        'configparser==3.5.0'
     ]
 )

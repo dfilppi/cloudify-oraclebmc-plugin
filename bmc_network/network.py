@@ -24,60 +24,112 @@ from cloudify.exceptions import NonRecoverableError
 from cloudify.decorators import operation
 
 
+TCP_PROTOCOL_TYPE = "6"
+UDP_PROTOCOL_TYPE = "17"
+
+
 def _set_security_rules(ctx,vcn_client,vcn):
+
     rules=[]
     for sr in ctx.node.properties['security_rules']:
+        cidr = sr.split(',')[0]
+        port = sr.split(',')[1]
+        prot = TCP_PROTOCOL_TYPE
+        if len(sr.split(',')) > 2:
+               prot = UDP_PROTOCOL_TYPE if sr.split(',')[2] == 'udp' else TCP_PROTOCOL_TYPE
         rule = oraclebmc.core.models.IngressSecurityRule()
-        rule.protocol = "6"
-        rule.source = sr.split(',')[0]
+        rule.protocol = prot
+        rule.source = cidr
         portrange = oraclebmc.core.models.PortRange()
-        portrange.min = sr.split(',')[1]
-        portrange.max = sr.split(',')[1]
-        topts = oraclebmc.core.models.TcpOptions()
-        topts.destination_port_range = portrange
-        rule.tcp_options = topts
+        portrange.min = port
+        portrange.max = port
+        if prot == TCP_PROTOCOL_TYPE:
+            topts = oraclebmc.core.models.TcpOptions()
+            topts.destination_port_range = portrange
+            rule.tcp_options = topts
+        else:
+            uopts = oraclebmc.core.models.UdpOptions()
+            uopts.destination_port_range = portrange
+            rule.udp_options = uopts
         rules.append(rule)
 
-    details = oraclebmc.core.models.UpdateSecurityListDetails()
+    details = oraclebmc.core.models.CreateSecurityListDetails()
+    details.compartment_id = vcn.compartment_id
+    details.display_name = "{}_seclist".format(ctx.instance.id)
+    details.vcn_id = vcn.id
     details.ingress_security_rules = rules
-    vcn_client.update_security_list(vcn.default_security_list_id,details)
+
+    # For now, egress wide open
+    egress_rules = []
+    rule = oraclebmc.core.models.EgressSecurityRule()
+    rule.destination = '0.0.0.0/0'
+    rule.protocol = TCP_PROTOCOL_TYPE
+    egress_rules.append(rule)
+    rule = oraclebmc.core.models.EgressSecurityRule()
+    rule.destination = '0.0.0.0/0'
+    rule.protocol = UDP_PROTOCOL_TYPE
+    egress_rules.append(rule)
+    details.egress_security_rules = egress_rules
+
+    resp = None
+    try:
+        resp = vcn_client.create_security_list(details)
+    except oraclebmc.exceptions.ServiceError as e:
+        raise NonRecoverableError("unable to create seclist. err= {}".format(
+                                  e.message))
+    ctx.instance.runtime_properties['seclist_id'] = resp.data.id
+    return resp.data.id
 
 
 @operation
 def create_vcn(**kwargs):
-
     ctx.logger.info("Creating VCN")
-    vcn_details = oraclebmc.core.models.CreateVcnDetails()
-    vcn_details.cidr_block = ctx.node.properties['cidr_block']
-    vcn_details.compartment_id = ctx.node.properties['compartment_id']
-    vcn_details.display_name = ctx.node.properties['name']
-    response = None
 
     vcn_client = (oraclebmc.core.VirtualNetworkClient(
                   ctx.node.properties['bmc_config']))
 
-    try:
-        response = vcn_client.create_vcn(vcn_details)
-    except:
-        ctx.logger.error("Exception:{}".format(sys.exc_info()[0]))
-        raise NonRecoverableError("VCN create failed: {}".
-                                  format(sys.exc_info()[0]))
+    vcn = None
 
-    vcn = response.data
+    if ctx.node.properties['use_external_resource']:
+        resource_id = ctx.node.properties['resource_id']
+        vcn = vcn_client.get_vcn(resource_id).data
+        if not vcn:
+            raise NonRecoverableError("resource id {} not found".
+                                      format(resource_id))
+        ctx.logger.info("Using existing resource")
+
+    else:
+
+        vcn_details = oraclebmc.core.models.CreateVcnDetails()
+        vcn_details.cidr_block = ctx.node.properties['cidr_block']
+        vcn_details.compartment_id = ctx.node.properties['compartment_id']
+        vcn_details.display_name = ctx.node.properties['name']
+        response = None
+
+    	try:
+            response = vcn_client.create_vcn(vcn_details)
+        except:
+            ctx.logger.error("Exception:{}".format(sys.exc_info()[0]))
+            raise NonRecoverableError("VCN create failed: {}".
+                                  format(sys.exc_info()[0]))
+        vcn = response.data
+
     ctx.logger.info("Created VCN {} {}".format(ctx.node.properties['name'],
                                                vcn.id))
     ctx.instance.runtime_properties['id'] = vcn.id
 
-    _set_security_rules(ctx,vcn_client,vcn)
 
 @operation
 def delete_vcn(**kwargs):
-
     ctx.logger.info("Deleting VCN")
 
+    vcn_client = (oraclebmc.core.VirtualNetworkClient(
+                  ctx.node.properties['bmc_config']))
+
+    if ctx.node.properties['use_external_resource']:
+        return
+
     try:
-        vcn_client = (oraclebmc.core.VirtualNetworkClient(
-                      ctx.node.properties['bmc_config']))
         vcn_client.delete_vcn(
             ctx.instance.runtime_properties['id'])
     except:
@@ -88,6 +140,9 @@ def delete_vcn(**kwargs):
 
 @operation
 def wait_for_vcn_terminated(**kwargs):
+
+    if ctx.node.properties['use_external_resource']:
+        return
 
     vcn_client = (oraclebmc.core.VirtualNetworkClient(
                ctx.node.properties['bmc_config']))
@@ -109,17 +164,31 @@ def wait_for_vcn_terminated(**kwargs):
 def create_subnet(**kwargs):
     ctx.logger.info("Creating subnet")
 
+    vcn_client = (oraclebmc.core.VirtualNetworkClient(
+                      ctx.node.properties['bmc_config']))
+
+    if ctx.node.properties['use_external_resource']:
+        resource_id = ctx.node.properties['resource_id']
+        subnet = vcn_client.get_subnet(resource_id).data
+        if not subnet:
+            raise NonRecoverableError("resource id {} not found".
+                                      format(resource_id))
+        ctx.logger.info("Using existing resource")
+        ctx.instance.runtime_properties["id"] = subnet.id
+        return
+
     details = oraclebmc.core.models.CreateSubnetDetails()
     details.cidr_block = ctx.node.properties['cidr_block']
     details.availability_domain = ctx.node.properties['availability_domain']
     details.compartment_id = ctx.node.properties['compartment_id']
     details.display_name = ctx.node.properties['name']
-    vcn_client = (oraclebmc.core.VirtualNetworkClient(
-                      ctx.node.properties['bmc_config']))
     vcn = vcn_client.get_vcn(
         ctx.instance.runtime_properties['vcn_id']).data
     details.route_table_id = vcn.default_route_table_id
     details.vcn_id = ctx.instance.runtime_properties['vcn_id']
+    list_id = _set_security_rules(ctx, vcn_client, vcn)
+    ctx.instance.runtime_properties['seclist_id'] = list_id
+    details.security_list_ids = [vcn.default_security_list_id, list_id]
     response = vcn_client.create_subnet(details)
 
     ctx.instance.runtime_properties["id"] = response.data.id
@@ -132,11 +201,19 @@ def delete_subnet(**kwargs):
 
     vcn_client = (oraclebmc.core.VirtualNetworkClient(
                       ctx.node.properties['bmc_config']))
+
+    if ctx.node.properties['use_external_resource']:
+        return
+
     vcn_client.delete_subnet(ctx.instance.runtime_properties['id'])
 
 
 @operation
 def wait_for_subnet_terminated(**kwargs):
+
+    if ctx.node.properties['use_external_resource']:
+        return
+
     vcn_client = (oraclebmc.core.VirtualNetworkClient(
                ctx.node.properties['bmc_config']))
 
@@ -152,7 +229,7 @@ def wait_for_subnet_terminated(**kwargs):
         pass
 
 
-def addto_route_table(vcn_client, vcn_id, cidrs, gateway_id):
+def _addto_route_table(vcn_client, vcn_id, cidrs, gateway_id):
     rules = []
     for cidr in cidrs:
         route_rule = oraclebmc.core.models.RouteRule()
@@ -167,7 +244,7 @@ def addto_route_table(vcn_client, vcn_id, cidrs, gateway_id):
     ctx.instance.runtime_properties['route_table_id'] = resp.data.id
 
 
-def delfrom_route_table(vcn_client, vcn_id, cidrs, gateway_id):
+def _delfrom_route_table(vcn_client, vcn_id, cidrs, gateway_id):
 
     vcn = vcn_client.get_vcn(vcn_id)
     resp = vcn_client.get_route_table(vcn.data.default_route_table_id)
@@ -189,13 +266,24 @@ def delfrom_route_table(vcn_client, vcn_id, cidrs, gateway_id):
 def create_gateway(**kwargs):
     ctx.logger.info("Creating internet gateway")
 
+    vcn_client = (oraclebmc.core.VirtualNetworkClient(
+                      ctx.node.properties['bmc_config']))
+
+    if ctx.node.properties['use_external_resource']:
+        resource_id = ctx.node.properties['resource_id']
+        gateway = vcn_client.get_internet_gateway(resource_id).data
+        if not gateway:
+            raise NonRecoverableError("resource id {} not found".
+                                      format(resource_id))
+        ctx.instance.runtime_properties["id"] = gateway.id
+        ctx.logger.info("Using existing resource")
+        return
+
     details = oraclebmc.core.models.CreateInternetGatewayDetails()
     details.compartment_id = ctx.node.properties['compartment_id']
     details.display_name = ctx.node.properties['name']
     details.is_enabled = ctx.node.properties['enabled']
     details.vcn_id = ctx.instance.runtime_properties['vcn_id']
-    vcn_client = (oraclebmc.core.VirtualNetworkClient(
-                      ctx.node.properties['bmc_config']))
     response = vcn_client.create_internet_gateway(details)
 
     ctx.instance.runtime_properties["id"] = response.data.id
@@ -203,7 +291,7 @@ def create_gateway(**kwargs):
 
     ctx.logger.info("Updating route table")
     if len(ctx.node.properties['route_cidrs']) > 0:
-        addto_route_table(vcn_client, details.vcn_id,
+        _addto_route_table(vcn_client, details.vcn_id,
                           ctx.node.properties['route_cidrs'],
                           response.data.id)
 
@@ -212,10 +300,13 @@ def create_gateway(**kwargs):
 def delete_gateway(**kwargs):
     ctx.logger.info("Deleting gateway")
 
+    if ctx.node.properties['use_external_resource']:
+        return
+
     vcn_client = (oraclebmc.core.VirtualNetworkClient(
                       ctx.node.properties['bmc_config']))
     if len(ctx.node.properties['route_cidrs']) > 0:
-        delfrom_route_table(vcn_client,
+        _delfrom_route_table(vcn_client,
                             ctx.instance.runtime_properties['vcn_id'],
                             ctx.node.properties['route_cidrs'],
                             ctx.instance.runtime_properties['id'])

@@ -26,6 +26,7 @@ from cloudify.decorators import operation
 RUNNING_STATE = 'RUNNING'
 TERMINATED_STATE = "TERMINATED"
 
+
 @operation
 def validate_node(**_):
     return True
@@ -33,6 +34,7 @@ def validate_node(**_):
 
 def _get_subnets(ctx):
     ids = []
+    ctx.logger.debug("RTPROPS={}".format(ctx.instance.runtime_properties))
     for prop in ctx.instance.runtime_properties:
         if prop.startswith("subnet_"):
             ids.append(ctx.instance.runtime_properties[prop])
@@ -44,9 +46,6 @@ def launch_instance(**kwargs):
 
     ctx.logger.info("Launching instance")
     subnet_ids = _get_subnets(ctx)
-    if len(subnet_ids) < 1:
-        raise NonRecoverableError("no subnet configured")
-
     launch_config = oraclebmc.core.models.LaunchInstanceDetails()
     launch_config.availability_domain = \
         ctx.node.properties['availability_domain']
@@ -85,10 +84,10 @@ def wait_for_running(**kwargs):
     instance = compute_client.get_instance(
          ctx.instance.runtime_properties['instance_id'])
 
-    if RUNNING_STATE != instance.data.lifecycle_state :
+    if RUNNING_STATE != instance.data.lifecycle_state:
         return ctx.operation.retry(
             message="Waiting for instance to start ({}). Retrying...".format(
-            instance.data.lifecycle_state),
+                instance.data.lifecycle_state),
             retry_after=kwargs['start_retry_interval'])
 
     try:
@@ -102,18 +101,18 @@ def wait_for_running(**kwargs):
         vnic = vnc_client.get_vnic(vnas.data[0].vnic_id)
         ctx.instance.runtime_properties['public_ip'] = vnic.data.public_ip
         ctx.instance.runtime_properties['private_ip'] = vnic.data.private_ip
-        # required by manager bootstrap, unfortunately
         ctx.instance.runtime_properties['ip'] = vnic.data.private_ip
 
     except:
         raise NonRecoverableError("Instance create failed: {}".format(
             sys.exc_info()[0]))
 
+
 @operation
 def terminate_instance(**kwargs):
     ctx.logger.info("Terminating instance")
 
-    compute_client=None
+    compute_client = None
 
     try:
         compute_client = oraclebmc.core.ComputeClient(
@@ -125,6 +124,7 @@ def terminate_instance(**kwargs):
         raise NonRecoverableError("Instance delete failed: {}".
                                   format(sys.exc_info()[0]))
 
+
 @operation
 def wait_for_terminated(**kwargs):
 
@@ -134,9 +134,8 @@ def wait_for_terminated(**kwargs):
     instance = compute_client.get_instance(
          ctx.instance.runtime_properties['instance_id'])
 
-    if TERMINATED_STATE != instance.data.lifecycle_state :
+    if TERMINATED_STATE != instance.data.lifecycle_state:
         return ctx.operation.retry(
             message="Waiting for instance to terminate ({}). Retrying...".format(
-            instance.data.lifecycle_state),
+                instance.data.lifecycle_state),
             retry_after=kwargs['terminate_retry_interval'])
-
